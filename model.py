@@ -11,15 +11,30 @@ from tqdm.notebook import tqdm
 from functools import partial
 from mlx.utils import tree_flatten
 
-# ==============================
-#  BLOQUES BILINEALES
-# ==============================
+# ============================================================
+#  LOW-RANK QUADRATIC BUILDING BLOCKS
+# ============================================================
 
-class BilinearEncoder(nn.Module):
+class LowRankQuadraticEncoder(nn.Module):
+    r"""
+    Low-Rank Quadratic Encoder.
+
+    Computes latent pre-activations as:
+
+    \[
+        z(x) = W x + \sum_{k=1}^{r} (U_k x) \odot (V_k x)
+    \]
+
+    where:
+    - \( W \in \mathbb{R}^{d_z \times d_x} \) is a linear map.
+    - \( U_k, V_k \in \mathbb{R}^{d_z \times d_x} \) define a rank-\(r\) factorization
+      of second-order interactions.
+    - The quadratic term approximates per-latent quadratic forms
+      \( x^\top A_i x \) with \( \mathrm{rank}(A_i) \le r \).
+
+    When `rank = 0`, this reduces exactly to a linear encoder.
     """
-    Encoder bilineal de bajo rango:
-        u(x) = W x + sum_{k=1}^rank (U_k x) ⊙ (V_k x)
-    """
+
     def __init__(self, in_dim: int, latent_dim: int, rank: int = 0, bias: bool = True):
         super().__init__()
         self.in_dim = in_dim
@@ -30,7 +45,8 @@ class BilinearEncoder(nn.Module):
 
         if self.rank > 0:
             scale = 1.0 / np.sqrt(in_dim)
-            # [rank, latent_dim, in_dim]
+            # Parameters stored as:
+            #   U, V: [rank, latent_dim, in_dim]
             self.U = mx.random.normal(
                 shape=(self.rank, latent_dim, in_dim),
                 dtype=mx.float32
@@ -44,9 +60,14 @@ class BilinearEncoder(nn.Module):
             self.V = None
 
     def _forward_2d(self, x):
-        """
-        x: [B, in_dim]
-        devuelve: [B, latent_dim]
+        r"""
+        Parameters
+        ----------
+        x : Tensor, shape [B, d_x]
+
+        Returns
+        -------
+        z : Tensor, shape [B, d_z]
         """
         B, D = x.shape
         assert D == self.in_dim, f"Expected in_dim={self.in_dim}, got {D}"
@@ -55,7 +76,8 @@ class BilinearEncoder(nn.Module):
         if self.rank == 0:
             return out
 
-        # U, V: [rank, latent_dim, in_dim] -> [rank*latent_dim, in_dim]
+        # Flatten U, V for efficient matmul:
+        #   [rank, latent_dim, in_dim] -> [rank*latent_dim, in_dim]
         U_flat = mx.reshape(self.U, (self.rank * self.latent_dim, self.in_dim))
         V_flat = mx.reshape(self.V, (self.rank * self.latent_dim, self.in_dim))
 
@@ -67,16 +89,17 @@ class BilinearEncoder(nn.Module):
         u = mx.reshape(u, (B, self.rank, self.latent_dim))
         v = mx.reshape(v, (B, self.rank, self.latent_dim))
 
-        # sum_k (U_k x) ⊙ (V_k x): sum over axis=1 (rank)
-        bil = (u * v).sum(axis=1)  # [B, latent_dim]
+        # Quadratic (low-rank) term:
+        #   sum_k (U_k x) ⊙ (V_k x)
+        quad = (u * v).sum(axis=1)  # [B, latent_dim]
 
-        return out + bil
+        return out + quad
 
     def __call__(self, x):
-        """
-        Soporta:
-          - x: [B, in_dim]      -> [B, latent_dim]
-          - x: [B, T, in_dim]   -> [B, T, latent_dim]
+        r"""
+        Supports:
+          - x: [B, d_x]      -> [B, d_z]
+          - x: [B, T, d_x]   -> [B, T, d_z]
         """
         if x.ndim == 2:
             return self._forward_2d(x)
@@ -85,21 +108,33 @@ class BilinearEncoder(nn.Module):
             B, T, D = x.shape
             assert D == self.in_dim, f"Expected in_dim={self.in_dim}, got {D}"
 
-            x_flat = mx.reshape(x, (B * T, D))          # [B*T, in_dim]
-            z_flat = self._forward_2d(x_flat)           # [B*T, latent_dim]
-            z = mx.reshape(z_flat, (B, T, self.latent_dim))  # [B, T, latent_dim]
+            x_flat = mx.reshape(x, (B * T, D))               # [B*T, d_x]
+            z_flat = self._forward_2d(x_flat)                # [B*T, d_z]
+            z = mx.reshape(z_flat, (B, T, self.latent_dim))  # [B, T, d_z]
             return z
 
-        raise ValueError(f"BilinearEncoder expects x.ndim in {{2,3}}, got {x.ndim}")
+        raise ValueError(f"LowRankQuadraticEncoder expects x.ndim in {{2,3}}, got {x.ndim}")
 
 
+class LowRankQuadraticDecoder(nn.Module):
+    r"""
+    Low-Rank Quadratic Decoder.
 
-class BilinearDecoder(nn.Module):
+    Reconstruction is computed as:
+
+    \[
+        x^* = D z,\quad
+        \hat{x} = x^* + \sum_{k=1}^{r} (U_k x^*) \odot (V_k x^*)
+    \]
+
+    where:
+    - \( D \in \mathbb{R}^{d_x \times d_z} \) is a linear decoder.
+    - The quadratic correction is applied in output space using a rank-\(r\)
+      factorization.
+
+    When `rank = 0`, this reduces exactly to a linear decoder.
     """
-    Decoder lineal + warp bilineal en el espacio de salida:
-        x*   = D z
-        x̂ = x* + sum_{k=1}^rank (U_k x*) ⊙ (V_k x*)
-    """
+
     def __init__(self, latent_dim: int, out_dim: int, rank: int = 0, bias: bool = True):
         super().__init__()
         self.latent_dim = latent_dim
@@ -110,16 +145,29 @@ class BilinearDecoder(nn.Module):
 
         if self.rank > 0:
             scale = 1.0 / np.sqrt(out_dim)
-            self.U_d = mx.random.normal(shape=(self.rank, out_dim, out_dim), dtype=mx.float32) * scale
-            self.V_d = mx.random.normal(shape=(self.rank, out_dim, out_dim), dtype=mx.float32) * scale
+            # Parameters stored as:
+            #   U_d, V_d: [rank, out_dim, out_dim]
+            self.U_d = mx.random.normal(
+                shape=(self.rank, out_dim, out_dim),
+                dtype=mx.float32
+            ) * scale
+            self.V_d = mx.random.normal(
+                shape=(self.rank, out_dim, out_dim),
+                dtype=mx.float32
+            ) * scale
         else:
             self.U_d = None
             self.V_d = None
 
     def __call__(self, z):
-        """
-        z: [B, latent_dim]
-        devuelve: x̂ [B, out_dim]
+        r"""
+        Parameters
+        ----------
+        z : Tensor, shape [B, d_z]
+
+        Returns
+        -------
+        x_hat : Tensor, shape [B, d_x]
         """
         x_lin = self.linear(z)  # [B, out_dim]
         if self.rank == 0:
@@ -127,7 +175,8 @@ class BilinearDecoder(nn.Module):
 
         B = x_lin.shape[0]
 
-        # U_d, V_d: [rank, out_dim, out_dim] -> [rank*out_dim, out_dim]
+        # Flatten U_d, V_d for efficient matmul:
+        #   [rank, out_dim, out_dim] -> [rank*out_dim, out_dim]
         U_flat = mx.reshape(self.U_d, (self.rank * self.out_dim, self.out_dim))
         V_flat = mx.reshape(self.V_d, (self.rank * self.out_dim, self.out_dim))
 
@@ -139,24 +188,48 @@ class BilinearDecoder(nn.Module):
         u = mx.reshape(u, (B, self.rank, self.out_dim))
         v = mx.reshape(v, (B, self.rank, self.out_dim))
 
-        # sum_k (U_k x*) ⊙ (V_k x*): sum over axis=1 (rank)
-        bil = (u * v).sum(axis=1)  # [B, out_dim]
+        # Quadratic correction:
+        #   sum_k (U_k x*) ⊙ (V_k x*)
+        quad = (u * v).sum(axis=1)  # [B, out_dim]
 
-        return x_lin + bil
+        return x_lin + quad
 
 
+# ============================================================
+#  LOW-RANK QUADRATIC SPARSE AUTOENCODER (LRQ-SAE)
+# ============================================================
 
-# ==============================
-#  AUTOENCODER ESPARSO BILINEAL REFINADO
-# ==============================
+class LowRankQuadraticSparseAutoencoder(nn.Module):
+    r"""
+    Low-Rank Quadratic Sparse Autoencoder (LRQ-SAE).
 
-class SparseAutoencoder(nn.Module):
+    Components
+    ----------
+    - Encoder: linear + low-rank quadratic term in input space.
+    - Decoder: linear + low-rank quadratic correction in output space.
+    - Sparsity: induced via BatchTopK on the pre-activations.
+
+    Encoder:
+    \[
+        z_{\mathrm{pre}}(x) = W x + \sum_{k=1}^{r_e} (U_k x) \odot (V_k x)
+    \]
+
+    Sparsification (BatchTopK):
+    \[
+        z = \mathrm{BatchTopK}(z_{\mathrm{pre}})
+    \]
+
+    Decoder:
+    \[
+        x^* = D z,\quad
+        \hat{x} = x^* + \sum_{k=1}^{r_d} (\tilde{U}_k x^*) \odot (\tilde{V}_k x^*)
+    \]
+
+    Degeneracy
+    ----------
+    If `encoder_rank = decoder_rank = 0`, LRQ-SAE reduces exactly to a linear SAE.
     """
-    SAE con:
-      - Encoder lineal + bilineal de rango encoder_rank (en x).
-      - Decoder lineal + bilineal de rango decoder_rank (en x*).
-      - Sparsidad inducida por BatchTopK sobre z_pre.
-    """
+
     def __init__(
         self,
         input_dim: int,
@@ -191,13 +264,13 @@ class SparseAutoencoder(nn.Module):
 
         mx.random.seed(seed)
 
-        self.encoder = BilinearEncoder(
+        self.encoder = LowRankQuadraticEncoder(
             in_dim=self.input_dim,
             latent_dim=self.latent_dim,
             rank=self.encoder_rank,
             bias=True,
         )
-        self.decoder = BilinearDecoder(
+        self.decoder = LowRankQuadraticDecoder(
             latent_dim=self.latent_dim,
             out_dim=self.output_dim,
             rank=self.decoder_rank,
@@ -216,9 +289,9 @@ class SparseAutoencoder(nn.Module):
         arch = self._arch_string()
         if save_datetime:
             ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-            base_name = f"bsae_{arch}_k{self.k}_ep{self.epochs_trained}_{ts}"
+            base_name = f"lrq_sae_{arch}_k{self.k}_ep{self.epochs_trained}_{ts}"
         else:
-            base_name = f"bsae_{arch}_k{self.k}_ep{self.epochs_trained}"
+            base_name = f"lrq_sae_{arch}_k{self.k}_ep{self.epochs_trained}"
 
         if path is None:
             os.makedirs("checkpoints", exist_ok=True)
@@ -247,7 +320,7 @@ class SparseAutoencoder(nn.Module):
         }
         with open(path + ".pkl", "wb") as f:
             pickle.dump(checkpoint, f, protocol=pickle.HIGHEST_PROTOCOL)
-        print(f"✓ Checkpoint guardado en: {path}.pkl")
+        print(f"✓ Checkpoint saved to: {path}.pkl")
 
     @classmethod
     def load(cls, file_path: str):
@@ -260,15 +333,31 @@ class SparseAutoencoder(nn.Module):
         model.epochs_trained = checkpoint["epochs_trained"]
         return model
 
-    # ==============================
-    #  UTILIDADES
-    # ==============================
+    # ============================================================
+    #  UTILITIES
+    # ============================================================
+
     def clip_norms(self, x):
+        r"""
+        Per-example norm clipping:
+
+        \[
+            x \leftarrow x \cdot \min\left(1, \frac{\tau}{\lVert x \rVert_2}\right)
+        \]
+        """
         norms = mx.linalg.norm(x, axis=1, keepdims=True)
         factors = mx.minimum(1.0, self.tau / norms)
         return x * factors
 
     def batch_topk(self, z, stride: int = 1):
+        r"""
+        BatchTopK sparsification:
+        keeps the top-\(k\) activations *per example on average* by selecting
+        a global threshold within the batch.
+
+        Implementation detail:
+        - uses a strided subset for threshold estimation (optional).
+        """
         batch_k = self.k * z.shape[0] // stride
         thr = mx.topk(z[::stride].flatten(), batch_k).min()
         return mx.where(z >= thr, z, 0.0)
@@ -285,6 +374,15 @@ class SparseAutoencoder(nn.Module):
         return self.decoder(z)
 
     def stats_reg(self, z_pre):
+        r"""
+        Latent-statistics regularizer encouraging balanced mean and variance:
+
+        \[
+            \mathcal{R}(z_{\text{pre}}) =
+            \mathbb{E}_j[(\mu_j - \bar{\mu})^2] +
+            \mathbb{E}_j[(\sigma_j - \bar{\sigma})^2]
+        \]
+        """
         mu = z_pre.mean(axis=0)
         sigma = z_pre.std(axis=0) + 1e-6
         mu_mean = mu.mean()
@@ -298,14 +396,24 @@ class SparseAutoencoder(nn.Module):
         z_pre = self.encoder(x)
         z = self.batch_topk(z_pre)
         x_hat = self.decoder(z)
-        return mx.mean(((x - x_hat)**2) / x.var(axis=1, keepdims=True)).item()
+        return mx.mean(((x - x_hat) ** 2) / x.var(axis=1, keepdims=True)).item()
 
     def loss_fn(self, x):
+        r"""
+        Training loss:
+
+        \[
+            \mathcal{L}(x) =
+            \mathrm{MSE}_\mathrm{norm}(x, \hat{x}) +
+            \lambda_\mu \, \mathcal{R}(z_{\text{pre}})
+        \]
+        """
         x = self.clip_norms(x)
         z_pre = self.encoder(x)
         z = self.batch_topk(z_pre)
         x_hat = self.decoder(z)
-        mse = mx.mean(((x - x_hat)**2) / x.var(axis=1, keepdims=True))
+
+        mse = mx.mean(((x - x_hat) ** 2) / x.var(axis=1, keepdims=True))
 
         activation_mask = z > 0
         self.last_activation += 1.0
@@ -345,17 +453,17 @@ class SparseAutoencoder(nn.Module):
         batch_size=1024,
         batches_per_block=100,
         n_epochs=1,
-        zarr_path='/path/to/your/data.zarr',
+        zarr_path="/path/to/your/data.zarr",
         total_len: int | None = None,
     ):
-        zarray = zarr.open(zarr_path, mode='r')
+        zarray = zarr.open(zarr_path, mode="r")
         if total_len is None:
             total_len = len(zarray)
         num_blocks = total_len // (batch_size * batches_per_block)
         self.batches_per_block = batches_per_block
         self.compile()
 
-        for epoch in tqdm(range(n_epochs), desc='Epochs', leave=True):
+        for epoch in tqdm(range(n_epochs), desc="Epochs", leave=True):
             total_loss, t0 = 0.0, time.time()
             with tqdm(total=num_blocks, desc=f"Epoch {epoch+1}", leave=False) as pbar:
                 for i, x_batch in enumerate(self.batch_iterator(zarray, total_len, batch_size, batches_per_block)):
