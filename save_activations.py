@@ -141,11 +141,8 @@ pad_token_id = tokenizer.pad_token_id
 bos_token_id = tokenizer.bos_token_id or tokenizer.eos_token_id
 
 # (Recommended) ensure deterministic inference behavior for activations
-try:
+if hasattr(model, "eval"):
     model.eval()
-except Exception:
-    # Not all MLX-LM wrappers expose eval(); safe to ignore.
-    pass
 
 
 # =============================================================================
