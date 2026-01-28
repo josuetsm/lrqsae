@@ -1,14 +1,18 @@
+from __future__ import annotations
+
+import datetime
+import os
+import pickle
+import time
+from functools import partial
+from typing import Iterator
+
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
 import numpy as np
 import zarr
-import os
-import time
-import pickle
-import datetime
 from tqdm.notebook import tqdm
-from functools import partial
 from mlx.utils import tree_flatten
 
 # ============================================================
@@ -59,7 +63,7 @@ class LowRankQuadraticEncoder(nn.Module):
             self.U = None
             self.V = None
 
-    def _forward_2d(self, x):
+    def _forward_2d(self, x: mx.array) -> mx.array:
         r"""
         Parameters
         ----------
@@ -95,7 +99,7 @@ class LowRankQuadraticEncoder(nn.Module):
 
         return out + quad
 
-    def __call__(self, x):
+    def __call__(self, x: mx.array) -> mx.array:
         r"""
         Supports:
           - x: [B, d_x]      -> [B, d_z]
@@ -159,7 +163,7 @@ class LowRankQuadraticDecoder(nn.Module):
             self.U_d = None
             self.V_d = None
 
-    def __call__(self, z):
+    def __call__(self, z: mx.array) -> mx.array:
         r"""
         Parameters
         ----------
@@ -282,10 +286,10 @@ class LowRankQuadraticSparseAutoencoder(nn.Module):
 
         self.history = {"mse": [], "dead_latents": []}
 
-    def _arch_string(self):
+    def _arch_string(self) -> str:
         return f"{self.input_dim}_{self.latent_dim}_{self.output_dim}__Er{self.encoder_rank}_Dr{self.decoder_rank}"
 
-    def save(self, path: str | None = None, save_datetime: bool = False):
+    def save(self, path: str | None = None, save_datetime: bool = False) -> None:
         arch = self._arch_string()
         if save_datetime:
             ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -323,7 +327,7 @@ class LowRankQuadraticSparseAutoencoder(nn.Module):
         print(f"✓ Checkpoint saved to: {path}.pkl")
 
     @classmethod
-    def load(cls, file_path: str):
+    def load(cls, file_path: str) -> "LowRankQuadraticSparseAutoencoder":
         with open(file_path, "rb") as f:
             checkpoint = pickle.load(f)
         model = cls(**checkpoint["config"])
@@ -337,7 +341,7 @@ class LowRankQuadraticSparseAutoencoder(nn.Module):
     #  UTILITIES
     # ============================================================
 
-    def clip_norms(self, x):
+    def clip_norms(self, x: mx.array) -> mx.array:
         r"""
         Per-example norm clipping:
 
@@ -349,7 +353,7 @@ class LowRankQuadraticSparseAutoencoder(nn.Module):
         factors = mx.minimum(1.0, self.tau / norms)
         return x * factors
 
-    def batch_topk(self, z, stride: int = 1):
+    def batch_topk(self, z: mx.array, stride: int = 1) -> mx.array:
         r"""
         BatchTopK sparsification:
         keeps the top-\(k\) activations *per example on average* by selecting
@@ -362,18 +366,18 @@ class LowRankQuadraticSparseAutoencoder(nn.Module):
         thr = mx.topk(z[::stride].flatten(), batch_k).min()
         return mx.where(z >= thr, z, 0.0)
 
-    def encode_pre(self, x):
+    def encode_pre(self, x: mx.array) -> mx.array:
         x = self.clip_norms(x)
         return self.encoder(x)
 
-    def encode(self, x):
+    def encode(self, x: mx.array) -> mx.array:
         z_pre = self.encode_pre(x)
         return self.batch_topk(z_pre)
 
-    def decode(self, z):
+    def decode(self, z: mx.array) -> mx.array:
         return self.decoder(z)
 
-    def stats_reg(self, z_pre):
+    def stats_reg(self, z_pre: mx.array) -> mx.array:
         r"""
         Latent-statistics regularizer encouraging balanced mean and variance:
 
@@ -391,14 +395,14 @@ class LowRankQuadraticSparseAutoencoder(nn.Module):
         loss_sigma = ((sigma - sigma_mean) ** 2).mean()
         return loss_mu + loss_sigma
 
-    def mse(self, x):
+    def mse(self, x: mx.array) -> float:
         x = self.clip_norms(x)
         z_pre = self.encoder(x)
         z = self.batch_topk(z_pre)
         x_hat = self.decoder(z)
         return mx.mean(((x - x_hat) ** 2) / x.var(axis=1, keepdims=True)).item()
 
-    def loss_fn(self, x):
+    def loss_fn(self, x: mx.array) -> mx.array:
         r"""
         Training loss:
 
@@ -421,7 +425,7 @@ class LowRankQuadraticSparseAutoencoder(nn.Module):
 
         return mse + self.lambda_mu * self.stats_reg(z_pre)
 
-    def compile(self):
+    def compile(self) -> None:
         self.loss_and_grad = nn.value_and_grad(self, self.loss_fn)
         tracked_state = [self.state, self.optimizer.state]
         self._train_step = partial(
@@ -430,16 +434,21 @@ class LowRankQuadraticSparseAutoencoder(nn.Module):
             outputs=tracked_state
         )(self._train_step_impl)
 
-    def _train_step_impl(self, x_batch):
+    def _train_step_impl(self, x_batch: mx.array) -> mx.array:
         loss, grads = self.loss_and_grad(x_batch)
         self.optimizer.update(self, grads)
         return loss
 
-    def train_step(self, x_batch):
+    def train_step(self, x_batch: mx.array) -> mx.array:
         return self._train_step(x_batch)
 
     @staticmethod
-    def batch_iterator(zarray, total_len, batch_size, batches_per_block):
+    def batch_iterator(
+        zarray: zarr.Array,
+        total_len: int,
+        batch_size: int,
+        batches_per_block: int,
+    ) -> Iterator[mx.array]:
         block_size = batch_size * batches_per_block
         for start in range(0, total_len, block_size):
             block = mx.array(zarray[start : start + block_size], dtype=mx.float32)
@@ -450,12 +459,12 @@ class LowRankQuadraticSparseAutoencoder(nn.Module):
 
     def fit(
         self,
-        batch_size=1024,
-        batches_per_block=100,
-        n_epochs=1,
-        zarr_path="/path/to/your/data.zarr",
+        batch_size: int = 1024,
+        batches_per_block: int = 100,
+        n_epochs: int = 1,
+        zarr_path: str = "/path/to/your/data.zarr",
         total_len: int | None = None,
-    ):
+    ) -> None:
         zarray = zarr.open(zarr_path, mode="r")
         if total_len is None:
             total_len = len(zarray)

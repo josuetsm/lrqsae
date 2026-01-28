@@ -219,7 +219,6 @@ target_offset = offset
 buffer = []
 t0 = time.time()
 last_save = time.time()
-last_offset = offset
 
 try:
     with tqdm(indices, total=len(indices)) as pbar:
@@ -289,7 +288,6 @@ try:
                     last_save = now
 
                 dt = max(1e-6, now - t0)
-                tps = (offset - last_offset) / max(1e-6, now - (now - (now - t0)))  # not super meaningful; keep simple below
                 pbar.set_postfix({"tokens": offset, "elapsed_s": int(dt)})
 
             # Less frequent save by document index as well
