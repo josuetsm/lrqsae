@@ -117,7 +117,7 @@ SEQ_LEN = 64
 BATCH_SIZE = 128
 ACTIVATION_DIM = 512  # Pythia-70M hidden size
 
-N_TOKENS_EST = 11_000_000
+N_TOKENS_EST = 10_000_000
 ZARR_PATH = "data/Pythia70M-L3-res-wiki.zarr"
 INPUT_IDS_PATH = "data/Pythia70M-L3-res-wiki-token-ids.jsonl"
 STATE_PATH = ZARR_PATH + ".state.json"
